@@ -1,3 +1,5 @@
 `work in progress`
 
-# Simple Deno crawler
+# Krauler
+
+Simple Deno crawler

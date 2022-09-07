@@ -1,10 +1,9 @@
-import { nanoid } from "https://deno.land/x/nanoid/mod.ts";
+import { Krauler } from "./krauler.ts";
+import type { HTML, URL } from "./krauler.ts";
 
-const THREADS = 128;
 const BASE_URL = "https://ru.wikipedia.org";
-const TO_FETCH_URLS = [BASE_URL];
-const UNIQUE_URLS = new Set(TO_FETCH_URLS);
-const VISITED_URLS = new Set();
+const THREADS = 64;
+const STEP_TO_WRITE_TO_DISK = 100_000;
 
 async function writeToDisk({
   data = "" as unknown,
@@ -21,35 +20,32 @@ async function writeToDisk({
   }
 }
 
-async function fetchPage(url: string) {
-  return await fetch(url).then((res) => res.text());
+function filterUrl(url: URL) {
+  return ![
+    "/wiki/Википедия:",
+    "/wiki/Категория:",
+    "/wiki/Обсуждение:",
+    "/wiki/Обсуждение_проекта:",
+    "/wiki/Обсуждение_участника:",
+    "/wiki/Обсуждение_участницы:",
+    "/wiki/Портал:",
+    "/wiki/Проект:",
+    "/wiki/Служебная:",
+    "/wiki/Справка:",
+    "/wiki/Участник:",
+    "/wiki/Участница:",
+    "/wiki/Файл:",
+    "/wiki/Шаблон:",
+  ].reduce((res, part) => res || url.startsWith(part), false);
 }
 
-function extractUrlParts(html: string) {
+function extractWikiUrlParts(html: HTML): string[] {
   try {
     return (
       html
         ?.match(/['"]\/wiki\/(.*?)[#'"]/g)
         ?.map((url) => decodeURIComponent(url.slice(1, -1)))
-        ?.filter(
-          (url) =>
-            ![
-              "/wiki/Википедия:",
-              "/wiki/Категория:",
-              "/wiki/Обсуждение:",
-              "/wiki/Обсуждение_проекта:",
-              "/wiki/Обсуждение_участника:",
-              "/wiki/Обсуждение_участницы:",
-              "/wiki/Портал:",
-              "/wiki/Проект:",
-              "/wiki/Служебная:",
-              "/wiki/Справка:",
-              "/wiki/Участник:",
-              "/wiki/Участница:",
-              "/wiki/Файл:",
-              "/wiki/Шаблон:",
-            ].reduce((res, part) => res || url.startsWith(part), false)
-        ) || []
+        ?.filter(filterUrl) || []
     );
   } catch (err) {
     console.error(err);
@@ -57,72 +53,49 @@ function extractUrlParts(html: string) {
   }
 }
 
-async function crawlLinks({
-  url = BASE_URL,
-  extract = extractUrlParts,
-  transform = (urlPart: string) => BASE_URL + urlPart,
-}) {
-  try {
-    if (VISITED_URLS.has(url)) throw "Already visited URL!";
-    const html = await fetchPage(url);
-    VISITED_URLS.add(url);
-    // const title = html.match(/\<title\>(.*?)\<\/title\>/)?.[1];
-    const extracted = extract(html);
-    return extracted.map(transform);
-  } catch (err) {
-    console.error(err);
-    return [];
-  }
-}
-
-async function* asyncLoop() {
-  const PROMISES_MAP = new Map<string, Promise<string[]>>();
-  while (TO_FETCH_URLS.length > 0) {
-    while (TO_FETCH_URLS.length > 0 && PROMISES_MAP.size < THREADS) {
-      const url = TO_FETCH_URLS.pop();
-      const promise = crawlLinks({ url });
-      PROMISES_MAP.set(nanoid(), promise);
-    }
-    const rivals = [...PROMISES_MAP].map(([key, promise]) =>
-      promise.then((res) => [key, res] as [string, string[]])
-    );
-    const [key, res] = await Promise.race(rivals);
-    PROMISES_MAP.delete(key);
-    res.forEach((url) => {
-      if (UNIQUE_URLS.has(url)) return;
-      TO_FETCH_URLS.push(url);
-      UNIQUE_URLS.add(url);
-    });
-    yield "KEEP IN LOOP!";
-  }
-  throw "END OF LOOP!";
+function extractUrls(html: HTML): URL[] {
+  return extractWikiUrlParts(html).map((urlPart) => BASE_URL + urlPart);
 }
 
 (async function () {
   try {
-    let base = 100000;
-    for await (const res of asyncLoop()) {
+    const loop = Krauler({
+      baseUrl: BASE_URL,
+      threads: THREADS,
+      extractUrls,
+    });
+    let base = STEP_TO_WRITE_TO_DISK;
+    for await (const {
+      toFetchStack,
+      uniqueUrlsSet,
+      visitedUrlsSet,
+      done,
+      message,
+    } of loop()) {
       console.log(
-        res,
-        "   unique: ",
-        UNIQUE_URLS.size,
-        "   to fetch: ",
-        TO_FETCH_URLS.length,
-        "   visited: ",
-        VISITED_URLS.size
+        message,
+        "      unique: ",
+        uniqueUrlsSet.size,
+        "      to fetch: ",
+        toFetchStack.length,
+        "      visited: ",
+        visitedUrlsSet.size
       );
-      if (UNIQUE_URLS.size < base) continue;
-      base = base + 100000;
-      writeToDisk({
-        data: [...UNIQUE_URLS],
-        name: "unique-" + UNIQUE_URLS.size,
-      });
+      if (uniqueUrlsSet.size >= base) {
+        base = base + STEP_TO_WRITE_TO_DISK;
+        writeToDisk({
+          data: [...uniqueUrlsSet],
+          name: "unique-" + uniqueUrlsSet.size,
+        });
+      }
+      if (done) {
+        writeToDisk({
+          data: [...uniqueUrlsSet].sort(),
+          name: "unique-" + uniqueUrlsSet.size,
+        });
+      }
     }
   } catch (err) {
     console.error(err);
-    writeToDisk({
-      data: [...UNIQUE_URLS],
-      name: "unique-" + UNIQUE_URLS.size,
-    });
   }
 })();
